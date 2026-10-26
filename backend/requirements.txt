@@ -5,6 +5,3 @@ passlib[bcrypt]
 bcrypt==4.0.1
 python-jose[cryptography]
 python-multipart
-global-land-mask
-numpy
-websockets

@@ -10,6 +10,7 @@ import math
 import io
 import csv
 import os
+import json
 import base64
 
 import models
@@ -18,7 +19,6 @@ import database
 
 app = FastAPI(title="SeaVision API")
 
-# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,7 +30,17 @@ app.add_middleware(
 models.Base.metadata.create_all(bind=database.engine)
 
 
-# ---------- Seed demo user ----------
+# ---------- Load precomputed A* routes ----------
+ROUTES_JSON_PATH = os.path.join(os.path.dirname(__file__), "routes_data.json")
+PRECOMPUTED = {}
+if os.path.exists(ROUTES_JSON_PATH):
+    with open(ROUTES_JSON_PATH, "r") as f:
+        PRECOMPUTED = json.load(f)
+    print(f"[routes] Loaded {len(PRECOMPUTED)} precomputed pairs")
+else:
+    print(f"[routes] WARNING: {ROUTES_JSON_PATH} not found — routes will fail")
+
+
 def seed_demo_data():
     db = database.SessionLocal()
     try:
@@ -91,13 +101,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
-# ---------- Schemas ----------
 class RegisterRequest(BaseModel):
     email: str
     password: str
 
 
-# ---------- Ports ----------
 PORTS = {
     "JNPT": (18.95, 72.95),
     "Chennai": (13.08, 80.28),
@@ -148,7 +156,6 @@ def add_vessel(
 ):
     if not imo_number.isdigit() or len(imo_number) != 7:
         raise HTTPException(400, "IMO number must be exactly 7 digits")
-
     image_data = ""
     if file is not None and file.filename:
         if not file.content_type or not file.content_type.startswith("image/"):
@@ -158,7 +165,6 @@ def add_vessel(
             raise HTTPException(400, "Image must be under 2 MB")
         b64 = base64.b64encode(contents).decode("utf-8")
         image_data = f"data:{file.content_type};base64,{b64}"
-
     v = models.Vessel(
         user_id=current_user.id,
         name=name,
@@ -187,10 +193,7 @@ def list_ports():
     return [{"name": k, "lat": v[0], "lon": v[1]} for k, v in PORTS.items()]
 
 
-# =====================================================================
-# ROUTES — fast, memory-light, no grid computation
-# =====================================================================
-
+# ---------- Routes (from precomputed JSON) ----------
 def haversine_nm(lat1, lon1, lat2, lon2):
     R = 3440.065
     la1, lo1, la2, lo2 = map(math.radians, [lat1, lon1, lat2, lon2])
@@ -204,33 +207,16 @@ def route_distance_nm(wps):
                for i in range(len(wps) - 1))
 
 
-def make_curved_path(lat1, lon1, lat2, lon2, offset, steps=40):
-    """
-    Create a smooth curved path from (lat1,lon1) to (lat2,lon2).
-    `offset` shifts the midpoint perpendicular to the direct line.
-    Positive offset = one side, negative = other side, zero = straight.
-    Routes stick roughly to real sea lanes because ports are on the coast
-    and the offset is small relative to the journey.
-    """
-    # Compute perpendicular direction
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    norm = math.hypot(dlat, dlon) or 1.0
-    perp_lat = -dlon / norm
-    perp_lon = dlat / norm
-
-    points = []
-    for i in range(steps):
-        t = i / (steps - 1)
-        # Linear interpolation between endpoints
-        lat = lat1 + dlat * t
-        lon = lon1 + dlon * t
-        # Add parabolic offset peaking at midpoint (t=0.5)
-        curve = 4 * t * (1 - t)  # 0 at ends, 1 at middle
-        lat += perp_lat * offset * curve
-        lon += perp_lon * offset * curve
-        points.append([round(lat, 4), round(lon, 4)])
-    return points
+def build_route(origin, destination, route_name):
+    if route_name not in ("Direct", "Northern", "Southern"):
+        raise HTTPException(400, "route_name must be Direct, Northern or Southern")
+    a, b = sorted((origin, destination))
+    key = f"{a}__{b}"
+    if key not in PRECOMPUTED:
+        raise HTTPException(500, f"No precomputed route for {a} ↔ {b}")
+    pair = PRECOMPUTED[key]
+    pts = pair[route_name]
+    return pts if origin == a else pts[::-1]
 
 
 @app.get("/routes")
@@ -239,12 +225,6 @@ def get_routes(origin: str, destination: str, current_user=Depends(get_current_u
         raise HTTPException(400, "Invalid port")
     if origin == destination:
         raise HTTPException(400, "Origin and destination must differ")
-
-    lat1, lon1 = PORTS[origin]
-    lat2, lon2 = PORTS[destination]
-
-    # Distance-based offset: longer voyages get wider swings
-    base_offset = max(1.0, route_distance_nm([[lat1, lon1], [lat2, lon2]]) / 600)
 
     def pack(wps, speed, label, color):
         dist = route_distance_nm(wps)
@@ -262,17 +242,13 @@ def get_routes(origin: str, destination: str, current_user=Depends(get_current_u
             "co2_tons": round(fuel * 3.15, 1),
         }
 
-    direct = make_curved_path(lat1, lon1, lat2, lon2, 0, 40)
-    northern = make_curved_path(lat1, lon1, lat2, lon2, base_offset, 40)
-    southern = make_curved_path(lat1, lon1, lat2, lon2, -base_offset, 40)
-
     return {
         "origin": origin,
         "destination": destination,
         "routes": [
-            pack(direct, 14, "Direct (Fastest)", "#22c55e"),
-            pack(northern, 12, "Northern (Cheapest)", "#3b82f6"),
-            pack(southern, 13, "Southern (Safest)", "#f97316"),
+            pack(build_route(origin, destination, "Direct"), 14, "Direct (Fastest)", "#22c55e"),
+            pack(build_route(origin, destination, "Northern"), 12, "Northern (Cheapest)", "#3b82f6"),
+            pack(build_route(origin, destination, "Southern"), 13, "Southern (Safest)", "#f97316"),
         ],
     }
 
@@ -284,19 +260,7 @@ def download_route(origin: str, destination: str, route_name: str, current_user=
     if origin == destination:
         raise HTTPException(400, "Origin and destination must differ")
 
-    lat1, lon1 = PORTS[origin]
-    lat2, lon2 = PORTS[destination]
-    base_offset = max(1.0, route_distance_nm([[lat1, lon1], [lat2, lon2]]) / 600)
-
-    if route_name == "Direct":
-        wps = make_curved_path(lat1, lon1, lat2, lon2, 0, 40)
-    elif route_name == "Northern":
-        wps = make_curved_path(lat1, lon1, lat2, lon2, base_offset, 40)
-    elif route_name == "Southern":
-        wps = make_curved_path(lat1, lon1, lat2, lon2, -base_offset, 40)
-    else:
-        raise HTTPException(400, "route_name must be Direct, Northern or Southern")
-
+    wps = build_route(origin, destination, route_name)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["lat", "lon"])
