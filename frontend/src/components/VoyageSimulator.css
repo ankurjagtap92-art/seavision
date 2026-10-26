@@ -1,0 +1,300 @@
+.sim-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: var(--bg);
+  animation: sim-fade-in 0.25s ease;
+}
+.sim-map-container {
+  position: absolute;
+  inset: 0;
+}
+
+@keyframes sim-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ---------- TOP BAR ---------- */
+.sim-top-bar {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  z-index: 500;
+  pointer-events: none;
+}
+.sim-top-bar > * { pointer-events: auto; }
+
+.sim-close {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: all 0.15s;
+}
+.sim-close:hover {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.sim-route-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 9px 16px;
+  border-radius: 100px;
+  box-shadow: var(--shadow-md);
+  font-size: 13px;
+}
+.sim-route-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.sim-route-label {
+  font-weight: 700;
+  color: var(--text);
+}
+.sim-route-route {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.sim-speed-controls {
+  display: inline-flex;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow-md);
+}
+.sim-speed-btn {
+  background: transparent;
+  border: none;
+  padding: 9px 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  border-right: 1px solid var(--border);
+}
+.sim-speed-btn:last-child { border-right: none; }
+.sim-speed-btn:hover { background: var(--surface-hover); color: var(--text); }
+.sim-speed-btn.active { background: var(--primary); color: white; }
+
+/* ---------- COMPASS HUD ---------- */
+.sim-compass-card {
+  position: absolute;
+  top: 80px;
+  left: 16px;
+  width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: var(--shadow-lg);
+  z-index: 500;
+  color: var(--text);
+  transition: background-color 0.25s;
+}
+.sim-compass-heading {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--text);
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+}
+.sim-compass-svg {
+  width: 100%;
+  display: block;
+}
+
+/* ---------- DATA HUD ---------- */
+.sim-data-card {
+  position: absolute;
+  bottom: 96px;
+  right: 16px;
+  width: 260px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: var(--shadow-lg);
+  z-index: 500;
+  color: var(--text);
+  transition: background-color 0.25s;
+}
+.sim-data-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.sim-data-row:last-child { border-bottom: none; padding-bottom: 0; }
+.sim-data-row:first-child { padding-top: 0; }
+.sim-data-primary { padding-bottom: 14px; }
+.sim-data-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.sim-data-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1;
+}
+.sim-data-unit {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  margin-left: 3px;
+  letter-spacing: 0;
+}
+.sim-data-value-sm {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ---------- PLAYBACK BAR ---------- */
+.sim-playback {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  box-shadow: var(--shadow-lg);
+  z-index: 500;
+  color: var(--text);
+  transition: background-color 0.25s;
+}
+.sim-play-btn, .sim-reset-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.sim-play-btn:hover, .sim-reset-btn:hover {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.sim-progress-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.sim-progress-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.sim-progress-track {
+  position: relative;
+  height: 6px;
+  background: var(--bg-muted);
+  border-radius: 100px;
+  overflow: visible;
+}
+.sim-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 100px;
+  transition: width 0.1s linear;
+}
+.sim-progress-tick {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 10px;
+  background: var(--border-strong);
+  border-radius: 1px;
+  transform: translate(-50%, -50%);
+  opacity: 0.6;
+}
+.sim-progress-ship {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid white;
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.15), 0 2px 6px rgba(0,0,0,0.25);
+  transform: translate(-50%, -50%);
+  transition: left 0.1s linear;
+}
+
+/* ---------- SHIP MARKER ---------- */
+.sim-ship-marker {
+  background: transparent;
+  border: none;
+}
+.sim-ship-icon {
+  width: 28px;
+  height: 28px;
+  transition: transform 0.3s ease;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.35));
+}
+
+/* ---------- DARK MODE MAP TILE TWEAK ---------- */
+[data-theme="dark"] .sim-map-container .leaflet-tile {
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.75);
+}
+
+/* ---------- RESPONSIVE ---------- */
+@media (max-width: 768px) {
+  .sim-route-route { display: none; }
+  .sim-compass-card { width: 140px; top: 76px; left: 12px; padding: 10px; }
+  .sim-compass-heading { font-size: 18px; }
+  .sim-data-card { width: 220px; bottom: 90px; right: 12px; padding: 12px; }
+  .sim-data-value { font-size: 20px; }
+  .sim-playback { padding: 10px 12px; gap: 8px; }
+  .sim-play-btn, .sim-reset-btn { width: 34px; height: 34px; }
+}

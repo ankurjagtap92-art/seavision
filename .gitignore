@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+backend/seavision.db
+backend/uploads/
+backend/*.db
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Environment (except production — we WANT .env.production pushed)
+.env
+.env.local
+frontend/.env.local
+!.env.production
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Docker (if you had a local build)
+backend/.docker/

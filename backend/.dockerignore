@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+seavision.db
+uploads/
+.env
+.venv/
+venv/
+*.log
