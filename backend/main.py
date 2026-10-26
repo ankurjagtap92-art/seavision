@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form   # ⬅ ADD File, UploadFile, Form
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles                                          # ⬅ NEW
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -10,16 +10,14 @@ from jose import JWTError, jwt
 import math
 import io
 import csv
-import os                                                                            # ⬅ NEW
-import uuid                                                                          # ⬅ NEW
-import shutil
-import base64                                                                         # ⬅ NEW
+import os
+import base64
 
 import heapq
 from collections import deque
 from functools import lru_cache
 import numpy as np
-from global_land_mask import globe
+# NOTE: global_land_mask is imported lazily inside functions to save startup memory
 
 import models
 import auth
@@ -27,11 +25,12 @@ import database
 
 app = FastAPI(title="SeaVision API")
 
+# ---------- CORS ----------
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "http://localhost:4173",
 ]
-# Vercel / production URLs from env
 _frontend_url = os.getenv("FRONTEND_URL", "")
 if _frontend_url:
     ALLOWED_ORIGINS.append(_frontend_url)
@@ -46,36 +45,41 @@ app.add_middleware(
 
 models.Base.metadata.create_all(bind=database.engine)
 
-# In main.py, after models.Base.metadata.create_all(...)
-def seed_data():
+
+# ---------- Optional: static uploads (legacy support only) ----------
+UPLOAD_DIR = "uploads"
+if os.path.isdir(UPLOAD_DIR):
+    app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+
+# ---------- Seed demo user ----------
+def seed_demo_data():
     db = database.SessionLocal()
     try:
-        if not db.query(models.User).first():
-            # Create a default demo user
-            hashed_pw = auth.get_password_hash("demo123")
-            demo_user = models.User(email="demo@seavision.com", hashed_password=hashed_pw)
-            db.add(demo_user)
-            db.commit()
-            # Add a sample vessel if the user has none
-            if not db.query(models.Vessel).filter(models.Vessel.user_id == demo_user.id).first():
-                vessel = models.Vessel(
-                    user_id=demo_user.id,
-                    name="MV Demo Ship",
-                    imo_number="9123456",
-                    vessel_type="Cargo",
-                    image_url=""
-                )
-                db.add(vessel)
-                db.commit()
+        if db.query(models.User).filter(models.User.email == "demo@seavision.com").first():
+            return
+        demo = models.User(
+            email="demo@seavision.com",
+            hashed_password=auth.get_password_hash("demo123"),
+        )
+        db.add(demo)
+        db.commit()
+        db.refresh(demo)
+        db.add(models.Vessel(
+            user_id=demo.id,
+            name="MV Samudra",
+            imo_number="9123456",
+            vessel_type="Cargo",
+            image_url="",
+        ))
+        db.commit()
+        print("[seed] Demo user created: demo@seavision.com / demo123")
+    except Exception as e:
+        print(f"[seed] Failed: {e}")
     finally:
         db.close()
 
-seed_data()
-
-# ---------- Static uploads ----------
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+seed_demo_data()
 
 
 # ---------- Dependencies ----------
@@ -90,9 +94,7 @@ def get_db():
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
-def get_current_user(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
-):
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     cred_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -117,13 +119,6 @@ class RegisterRequest(BaseModel):
     password: str
 
 
-class VesselCreate(BaseModel):
-    name: str
-    imo_number: str
-    vessel_type: str
-    image_url: Optional[str] = ""
-
-
 # ---------- Ports ----------
 PORTS = {
     "JNPT": (18.95, 72.95),
@@ -135,17 +130,14 @@ PORTS = {
 }
 
 
-# ---------- Auth routes ----------
+# ---------- Auth ----------
 @app.post("/register")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(models.User).filter(models.User.email == req.email).first():
         raise HTTPException(400, "Email already registered")
     if len(req.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
-    user = models.User(
-        email=req.email,
-        hashed_password=auth.get_password_hash(req.password),
-    )
+    user = models.User(email=req.email, hashed_password=auth.get_password_hash(req.password))
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -153,10 +145,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/token")
-def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db),
-):
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(401, "Invalid credentials")
@@ -164,7 +153,7 @@ def login(
     return {"access_token": token, "token_type": "bearer"}
 
 
-# ---------- Vessel CRUD ----------
+# ---------- Vessels ----------
 @app.get("/vessels")
 def list_vessels(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Vessel).filter(models.Vessel.user_id == current_user.id).all()
@@ -186,13 +175,9 @@ def add_vessel(
     if file is not None and file.filename:
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(400, "Uploaded file must be an image")
-
-        # Read and validate size (2 MB cap — base64 inflation makes DBs grow fast)
         contents = file.file.read()
         if len(contents) > 2 * 1024 * 1024:
             raise HTTPException(400, "Image must be under 2 MB")
-
-        # Store as data URL — self-contained inside SQLite
         b64 = base64.b64encode(contents).decode("utf-8")
         image_data = f"data:{file.content_type};base64,{b64}"
 
@@ -206,20 +191,12 @@ def add_vessel(
     db.add(v)
     db.commit()
     db.refresh(v)
-    return v        
+    return v
 
 
 @app.delete("/vessels/{vessel_id}")
-def delete_vessel(
-    vessel_id: int,
-    current_user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    v = (
-        db.query(models.Vessel)
-        .filter(models.Vessel.id == vessel_id, models.Vessel.user_id == current_user.id)
-        .first()
-    )
+def delete_vessel(vessel_id: int, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    v = db.query(models.Vessel).filter(models.Vessel.id == vessel_id, models.Vessel.user_id == current_user.id).first()
     if not v:
         raise HTTPException(404, "Vessel not found")
     db.delete(v)
@@ -227,27 +204,21 @@ def delete_vessel(
     return {"message": "Deleted"}
 
 
-# ---------- Ports ----------
 @app.get("/ports")
 def list_ports():
     return [{"name": k, "lat": v[0], "lon": v[1]} for k, v in PORTS.items()]
 
 
 # =====================================================================
-# LAND-AWARE SEA ROUTING (Claude's solution)
-# Routes are computed with A* over a water grid derived from a global
-# ~1 km land mask. By construction, routes cannot cross land. Palk
-# Strait / Adam's Bridge is explicitly closed so east↔west traffic
-# rounds Sri Lanka just like real ships do.
+# SEA ROUTING — memory-optimized for 512MB containers
 # =====================================================================
-
-LAT0, LAT1, LON0, LON1 = -2.0, 26.0, 65.0, 108.0
-RES = 0.05
+# Tightened region: only covers the ports + margin (was -2..26 lat, 65..108 lon)
+LAT0, LAT1, LON0, LON1 = 0.0, 25.0, 68.0, 106.0
+RES = 0.08              # coarser than 0.05 — saves ~70% grid memory
 CLEAR = 0.03
 NY = int(round((LAT1 - LAT0) / RES)) + 1
 NX = int(round((LON1 - LON0) / RES)) + 1
 
-# Palk Strait: lat_min, lat_max, lon_min, lon_max
 PALK_BOX = (8.8, 10.4, 79.0, 80.3)
 
 _NAV = None
@@ -257,34 +228,41 @@ _WIDE = None
 def haversine_nm(lat1, lon1, lat2, lon2):
     R = 3440.065
     la1, lo1, la2, lo2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    a = (
-        math.sin((la2 - la1) / 2) ** 2
-        + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
-    )
+    a = (math.sin((la2 - la1) / 2) ** 2
+         + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
     return 2 * R * math.asin(math.sqrt(a))
 
 
 def route_distance_nm(wps):
-    return sum(
-        haversine_nm(wps[i][0], wps[i][1], wps[i + 1][0], wps[i + 1][1])
-        for i in range(len(wps) - 1)
-    )
+    return sum(haversine_nm(wps[i][0], wps[i][1], wps[i + 1][0], wps[i + 1][1])
+               for i in range(len(wps) - 1))
 
 
 def _grids():
+    """Build navigable-water grid lazily — only on first route request."""
     global _NAV, _WIDE
     if _NAV is not None:
         return _NAV, _WIDE
+
+    from global_land_mask import globe  # lazy import = saves ~200MB until first route
+
     lats = LAT0 + np.arange(NY) * RES
     lons = LON0 + np.arange(NX) * RES
-    LA, LO = np.meshgrid(lats, lons, indexing="ij")
-    ok = np.ones(LA.shape, dtype=bool)
-    for dy, dx in [(0, 0), (CLEAR, 0), (-CLEAR, 0), (0, CLEAR), (0, -CLEAR)]:
-        ok &= ~globe.is_land(LA + dy, LO + dx)
-    a, b, c, d = PALK_BOX
-    ok &= ~((LA >= a) & (LA <= b) & (LO >= c) & (LO <= d))
+    # Use broadcasting instead of meshgrid — avoids allocating 2 extra full-size arrays
+    lat_col = lats[:, np.newaxis]
+    lon_row = lons[np.newaxis, :]
 
-    # Keep only water connected to the open ocean (drops lakes and inlets)
+    ok = np.ones((NY, NX), dtype=bool)
+    for dy, dx in [(0, 0), (CLEAR, 0), (-CLEAR, 0), (0, CLEAR), (0, -CLEAR)]:
+        ok &= ~globe.is_land(lat_col + dy, lon_row + dx)
+
+    a, b, c, d = PALK_BOX
+    LA = lat_col + np.zeros((1, NX))
+    LO = lon_row + np.zeros((NY, 1))
+    ok &= ~((LA >= a) & (LA <= b) & (LO >= c) & (LO <= d))
+    del LA, LO
+
+    # Flood-fill from open ocean to drop lakes/inlets
     seed = (int(round((10.0 - LAT0) / RES)), int(round((88.0 - LON0) / RES)))
     seen = np.zeros(ok.shape, bool)
     seen[seed] = True
@@ -294,23 +272,20 @@ def _grids():
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
                 ny, nx = y + dy, x + dx
-                if (
-                    0 <= ny < NY
-                    and 0 <= nx < NX
-                    and ok[ny, nx]
-                    and not seen[ny, nx]
-                    and (not (dy and dx) or (ok[y + dy, x] and ok[y, x + dx]))
-                ):
+                if (0 <= ny < NY and 0 <= nx < NX and ok[ny, nx] and not seen[ny, nx]
+                        and (not (dy and dx) or (ok[y + dy, x] and ok[y, x + dx]))):
                     seen[ny, nx] = True
                     q.append((ny, nx))
+
     wide = seen.copy()
-    for _ in range(3):
+    for _ in range(2):  # erode 2 cells (was 3)
         e = wide.copy()
         e[1:, :] &= wide[:-1, :]
         e[:-1, :] &= wide[1:, :]
         e[:, 1:] &= wide[:, :-1]
         e[:, :-1] &= wide[:, 1:]
         wide = e
+
     _NAV, _WIDE = seen, wide
     return _NAV, _WIDE
 
@@ -339,10 +314,8 @@ def _snap(lat, lon, maxr=60):
     raise ValueError(f"No navigable water near {lat},{lon}")
 
 
-_NB = [
-    (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-    (-1, -1, 1.4142), (-1, 1, 1.4142), (1, -1, 1.4142), (1, 1, 1.4142),
-]
+_NB = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+       (-1, -1, 1.4142), (-1, 1, 1.4142), (1, -1, 1.4142), (1, 1, 1.4142)]
 
 
 def _astar(src, dst, offshore_cost):
@@ -380,7 +353,8 @@ def _astar(src, dst, offshore_cost):
     return path[::-1]
 
 
-def _clear_line(a, b, clr, step=0.01):
+def _clear_line(a, b, clr, step=0.02):
+    from global_land_mask import globe
     n = max(1, int(max(abs(b[0] - a[0]), abs(b[1] - a[1])) / step))
     t = np.linspace(0, 1, n + 1)
     la = a[0] + (b[0] - a[0]) * t
@@ -442,15 +416,12 @@ def _variant_via(direct, o, d, sign):
 
 @lru_cache(maxsize=None)
 def _compute_pair(a, b):
-    """a < b alphabetically. Returns dict of 3 route variants for a→b."""
     o, d = PORTS[a], PORTS[b]
     direct = _sea_path(o, d, offshore_cost=4.0)
     variants = {"Direct": direct}
     for name, sign, cost in (("Northern", +1, 4.0), ("Southern", -1, 12.0)):
         try:
-            variants[name] = _sea_path(
-                o, d, via=_variant_via(direct, o, d, sign), offshore_cost=cost
-            )
+            variants[name] = _sea_path(o, d, via=_variant_via(direct, o, d, sign), offshore_cost=cost)
         except ValueError:
             variants[name] = direct
     return {k: _densify(v) for k, v in variants.items()}
@@ -464,17 +435,13 @@ def build_route(origin, destination, route_name):
     return pts if origin == a else pts[::-1]
 
 
-# ---------- Route generation ----------
+# ---------- Routes ----------
 @app.get("/routes")
 def get_routes(origin: str, destination: str, current_user=Depends(get_current_user)):
     if origin not in PORTS or destination not in PORTS:
         raise HTTPException(400, "Invalid port")
     if origin == destination:
         raise HTTPException(400, "Origin and destination must differ")
-
-    direct = build_route(origin, destination, "Direct")
-    northern = build_route(origin, destination, "Northern")
-    southern = build_route(origin, destination, "Southern")
 
     def pack(wps, speed, label, color):
         dist = route_distance_nm(wps)
@@ -496,21 +463,15 @@ def get_routes(origin: str, destination: str, current_user=Depends(get_current_u
         "origin": origin,
         "destination": destination,
         "routes": [
-            pack(direct, 14, "Direct (Fastest)", "#22c55e"),
-            pack(northern, 12, "Northern (Cheapest)", "#3b82f6"),
-            pack(southern, 13, "Southern (Safest)", "#f97316"),
+            pack(build_route(origin, destination, "Direct"), 14, "Direct (Fastest)", "#22c55e"),
+            pack(build_route(origin, destination, "Northern"), 12, "Northern (Cheapest)", "#3b82f6"),
+            pack(build_route(origin, destination, "Southern"), 13, "Southern (Safest)", "#f97316"),
         ],
     }
 
 
-# ---------- CSV download ----------
 @app.get("/routes/download")
-def download_route(
-    origin: str,
-    destination: str,
-    route_name: str,
-    current_user=Depends(get_current_user),
-):
+def download_route(origin: str, destination: str, route_name: str, current_user=Depends(get_current_user)):
     if origin not in PORTS or destination not in PORTS:
         raise HTTPException(400, "Invalid port")
     if origin == destination:
@@ -528,29 +489,5 @@ def download_route(
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="{origin}_{destination}_{route_name}.csv"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="{origin}_{destination}_{route_name}.csv"'},
     )
-
-
-# ---------- Startup warming (background thread so the app boots instantly) ----------
-@app.on_event("startup")
-def _warm():
-    """Pre-compute all 15 port pairs in a background thread so the first
-    user click is fast. Fails silently — if warming breaks, routes still
-    compute on demand."""
-    import threading
-
-    def _do_warm():
-        import itertools
-        for a, b in itertools.combinations(sorted(PORTS), 2):
-            try:
-                _compute_pair(a, b)
-                print(f"[warm] {a} <-> {b} ready")
-            except Exception as e:
-                print(f"[warm] FAILED {a},{b}: {e}")
-
-    threading.Thread(target=_do_warm, daemon=True).start()
-
-    
