@@ -217,7 +217,7 @@ def main():
     print(f"Grid built: {NY}×{NX} cells\n")
 
     result = {}
-    ports = list(PORTS.keys())
+    ports = sorted(PORTS.keys())
     for i, a in enumerate(ports):
         for b in ports[i+1:]:
             key = f"{a}__{b}"
