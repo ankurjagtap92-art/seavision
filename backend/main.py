@@ -26,19 +26,12 @@ import database
 app = FastAPI(title="SeaVision API")
 
 # ---------- CORS ----------
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://localhost:4173",
-]
-_frontend_url = os.getenv("FRONTEND_URL", "")
-if _frontend_url:
-    ALLOWED_ORIGINS.append(_frontend_url)
-
+# Bulletproof: allow any origin. We use Bearer tokens (not cookies),
+# so allow_credentials=False is safe and lets us use the wildcard "*" origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -212,9 +205,8 @@ def list_ports():
 # =====================================================================
 # SEA ROUTING — memory-optimized for 512MB containers
 # =====================================================================
-# Tightened region: only covers the ports + margin (was -2..26 lat, 65..108 lon)
 LAT0, LAT1, LON0, LON1 = 0.0, 25.0, 68.0, 106.0
-RES = 0.08              # coarser than 0.05 — saves ~70% grid memory
+RES = 0.08
 CLEAR = 0.03
 NY = int(round((LAT1 - LAT0) / RES)) + 1
 NX = int(round((LON1 - LON0) / RES)) + 1
@@ -244,11 +236,10 @@ def _grids():
     if _NAV is not None:
         return _NAV, _WIDE
 
-    from global_land_mask import globe  # lazy import = saves ~200MB until first route
+    from global_land_mask import globe
 
     lats = LAT0 + np.arange(NY) * RES
     lons = LON0 + np.arange(NX) * RES
-    # Use broadcasting instead of meshgrid — avoids allocating 2 extra full-size arrays
     lat_col = lats[:, np.newaxis]
     lon_row = lons[np.newaxis, :]
 
@@ -262,7 +253,6 @@ def _grids():
     ok &= ~((LA >= a) & (LA <= b) & (LO >= c) & (LO <= d))
     del LA, LO
 
-    # Flood-fill from open ocean to drop lakes/inlets
     seed = (int(round((10.0 - LAT0) / RES)), int(round((88.0 - LON0) / RES)))
     seen = np.zeros(ok.shape, bool)
     seen[seed] = True
@@ -278,7 +268,7 @@ def _grids():
                     q.append((ny, nx))
 
     wide = seen.copy()
-    for _ in range(2):  # erode 2 cells (was 3)
+    for _ in range(2):
         e = wide.copy()
         e[1:, :] &= wide[:-1, :]
         e[:-1, :] &= wide[1:, :]
