@@ -2,7 +2,6 @@ from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, F
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -13,12 +12,6 @@ import csv
 import os
 import base64
 
-import heapq
-from collections import deque
-from functools import lru_cache
-import numpy as np
-# NOTE: global_land_mask is imported lazily inside functions to save startup memory
-
 import models
 import auth
 import database
@@ -26,8 +19,6 @@ import database
 app = FastAPI(title="SeaVision API")
 
 # ---------- CORS ----------
-# Bulletproof: allow any origin. We use Bearer tokens (not cookies),
-# so allow_credentials=False is safe and lets us use the wildcard "*" origin.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,12 +28,6 @@ app.add_middleware(
 )
 
 models.Base.metadata.create_all(bind=database.engine)
-
-
-# ---------- Optional: static uploads (legacy support only) ----------
-UPLOAD_DIR = "uploads"
-if os.path.isdir(UPLOAD_DIR):
-    app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 # ---------- Seed demo user ----------
@@ -203,19 +188,8 @@ def list_ports():
 
 
 # =====================================================================
-# SEA ROUTING — memory-optimized for 512MB containers
+# ROUTES — fast, memory-light, no grid computation
 # =====================================================================
-LAT0, LAT1, LON0, LON1 = 0.0, 25.0, 68.0, 106.0
-RES = 0.08
-CLEAR = 0.03
-NY = int(round((LAT1 - LAT0) / RES)) + 1
-NX = int(round((LON1 - LON0) / RES)) + 1
-
-PALK_BOX = (8.8, 10.4, 79.0, 80.3)
-
-_NAV = None
-_WIDE = None
-
 
 def haversine_nm(lat1, lon1, lat2, lon2):
     R = 3440.065
@@ -230,208 +204,47 @@ def route_distance_nm(wps):
                for i in range(len(wps) - 1))
 
 
-def _grids():
-    """Build navigable-water grid lazily — only on first route request."""
-    global _NAV, _WIDE
-    if _NAV is not None:
-        return _NAV, _WIDE
-
-    from global_land_mask import globe
-
-    lats = LAT0 + np.arange(NY) * RES
-    lons = LON0 + np.arange(NX) * RES
-    lat_col = lats[:, np.newaxis]
-    lon_row = lons[np.newaxis, :]
-
-    ok = np.ones((NY, NX), dtype=bool)
-    for dy, dx in [(0, 0), (CLEAR, 0), (-CLEAR, 0), (0, CLEAR), (0, -CLEAR)]:
-        ok &= ~globe.is_land(lat_col + dy, lon_row + dx)
-
-    a, b, c, d = PALK_BOX
-    LA = lat_col + np.zeros((1, NX))
-    LO = lon_row + np.zeros((NY, 1))
-    ok &= ~((LA >= a) & (LA <= b) & (LO >= c) & (LO <= d))
-    del LA, LO
-
-    seed = (int(round((10.0 - LAT0) / RES)), int(round((88.0 - LON0) / RES)))
-    seen = np.zeros(ok.shape, bool)
-    seen[seed] = True
-    q = deque([seed])
-    while q:
-        y, x = q.popleft()
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                ny, nx = y + dy, x + dx
-                if (0 <= ny < NY and 0 <= nx < NX and ok[ny, nx] and not seen[ny, nx]
-                        and (not (dy and dx) or (ok[y + dy, x] and ok[y, x + dx]))):
-                    seen[ny, nx] = True
-                    q.append((ny, nx))
-
-    wide = seen.copy()
-    for _ in range(2):
-        e = wide.copy()
-        e[1:, :] &= wide[:-1, :]
-        e[:-1, :] &= wide[1:, :]
-        e[:, 1:] &= wide[:, :-1]
-        e[:, :-1] &= wide[:, 1:]
-        wide = e
-
-    _NAV, _WIDE = seen, wide
-    return _NAV, _WIDE
-
-
-def _cell(lat, lon):
-    return int(round((lat - LAT0) / RES)), int(round((lon - LON0) / RES))
-
-
-def _ll(c):
-    return LAT0 + c[0] * RES, LON0 + c[1] * RES
-
-
-def _snap(lat, lon, maxr=60):
-    nav, _ = _grids()
-    y0, x0 = _cell(lat, lon)
-    for r in range(maxr):
-        best = None
-        for y in range(max(0, y0 - r), min(NY, y0 + r + 1)):
-            for x in range(max(0, x0 - r), min(NX, x0 + r + 1)):
-                if max(abs(y - y0), abs(x - x0)) == r and nav[y, x]:
-                    d = (y - y0) ** 2 + (x - x0) ** 2
-                    if best is None or d < best[0]:
-                        best = (d, (y, x))
-        if best:
-            return best[1]
-    raise ValueError(f"No navigable water near {lat},{lon}")
-
-
-_NB = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-       (-1, -1, 1.4142), (-1, 1, 1.4142), (1, -1, 1.4142), (1, 1, 1.4142)]
-
-
-def _astar(src, dst, offshore_cost):
-    nav, wide = _grids()
-
-    def h(c):
-        dy, dx = abs(c[0] - dst[0]), abs(c[1] - dst[1])
-        return max(dy, dx) + 0.4142 * min(dy, dx)
-
-    openq = [(h(src), 0.0, src)]
-    best = {src: 0.0}
-    prev = {}
-    while openq:
-        _, g, c = heapq.heappop(openq)
-        if c == dst:
-            break
-        if g > best.get(c, 1e18):
-            continue
-        for dy, dx, w in _NB:
-            n = (c[0] + dy, c[1] + dx)
-            if not (0 <= n[0] < NY and 0 <= n[1] < NX) or not nav[n]:
-                continue
-            if dy and dx and not (nav[c[0] + dy, c[1]] and nav[c[0], c[1] + dx]):
-                continue
-            ng = g + w * (1.0 if wide[n] else offshore_cost)
-            if ng < best.get(n, 1e18):
-                best[n] = ng
-                prev[n] = c
-                heapq.heappush(openq, (ng + h(n), ng, n))
-    if src != dst and dst not in prev:
-        raise ValueError("No sea path between the given points")
-    path = [dst]
-    while path[-1] != src:
-        path.append(prev[path[-1]])
-    return path[::-1]
-
-
-def _clear_line(a, b, clr, step=0.02):
-    from global_land_mask import globe
-    n = max(1, int(max(abs(b[0] - a[0]), abs(b[1] - a[1])) / step))
-    t = np.linspace(0, 1, n + 1)
-    la = a[0] + (b[0] - a[0]) * t
-    lo = a[1] + (b[1] - a[1]) * t
-    for dy, dx in [(0, 0), (clr, 0), (-clr, 0), (0, clr), (0, -clr)]:
-        if globe.is_land(la + dy, lo + dx).any():
-            return False
-    a_, b_, c_, d_ = PALK_BOX
-    if ((la >= a_) & (la <= b_) & (lo >= c_) & (lo <= d_)).any():
-        return False
-    return True
-
-
-def _smooth(pts, clr=0.10):
-    out, i = [pts[0]], 0
-    while i < len(pts) - 1:
-        j = len(pts) - 1
-        while j > i + 1 and not _clear_line(pts[i], pts[j], clr):
-            j -= 1
-        out.append(pts[j])
-        i = j
-    return out
-
-
-def _sea_path(o, d, via=None, offshore_cost=4.0):
-    pts = [o] + ([via] if via else []) + [d]
-    cells = [_snap(*p) for p in pts]
-    full = []
-    for a, b in zip(cells, cells[1:]):
-        seg = _astar(a, b, offshore_cost)
-        full += seg if not full else seg[1:]
-    return [o] + _smooth([_ll(c) for c in full]) + [d]
-
-
-def _densify(points, max_step=0.2):
-    out = []
-    for (la1, lo1), (la2, lo2) in zip(points, points[1:]):
-        n = max(1, int(max(abs(la2 - la1), abs(lo2 - lo1)) / max_step))
-        for j in range(n):
-            f = j / n
-            out.append([round(la1 + (la2 - la1) * f, 4), round(lo1 + (lo2 - lo1) * f, 4)])
-    out.append([round(points[-1][0], 4), round(points[-1][1], 4)])
-    return out
-
-
-def _variant_via(direct, o, d, sign):
-    dists = [0.0]
-    for p, q in zip(direct, direct[1:]):
-        dists.append(dists[-1] + haversine_nm(p[0], p[1], q[0], q[1]))
-    mid = next(p for p, s in zip(direct, dists) if s >= dists[-1] / 2)
-    dlat, dlon = d[0] - o[0], d[1] - o[1]
+def make_curved_path(lat1, lon1, lat2, lon2, offset, steps=40):
+    """
+    Create a smooth curved path from (lat1,lon1) to (lat2,lon2).
+    `offset` shifts the midpoint perpendicular to the direct line.
+    Positive offset = one side, negative = other side, zero = straight.
+    Routes stick roughly to real sea lanes because ports are on the coast
+    and the offset is small relative to the journey.
+    """
+    # Compute perpendicular direction
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
     norm = math.hypot(dlat, dlon) or 1.0
-    pl, po = -dlon / norm, dlat / norm
-    if pl < -1e-9 or (abs(pl) < 1e-9 and po < 0):
-        pl, po = -pl, -po
-    off = min(3.0, max(1.0, 0.12 * norm))
-    return (mid[0] + sign * pl * off, mid[1] + sign * po * off)
+    perp_lat = -dlon / norm
+    perp_lon = dlat / norm
+
+    points = []
+    for i in range(steps):
+        t = i / (steps - 1)
+        # Linear interpolation between endpoints
+        lat = lat1 + dlat * t
+        lon = lon1 + dlon * t
+        # Add parabolic offset peaking at midpoint (t=0.5)
+        curve = 4 * t * (1 - t)  # 0 at ends, 1 at middle
+        lat += perp_lat * offset * curve
+        lon += perp_lon * offset * curve
+        points.append([round(lat, 4), round(lon, 4)])
+    return points
 
 
-@lru_cache(maxsize=None)
-def _compute_pair(a, b):
-    o, d = PORTS[a], PORTS[b]
-    direct = _sea_path(o, d, offshore_cost=4.0)
-    variants = {"Direct": direct}
-    for name, sign, cost in (("Northern", +1, 4.0), ("Southern", -1, 12.0)):
-        try:
-            variants[name] = _sea_path(o, d, via=_variant_via(direct, o, d, sign), offshore_cost=cost)
-        except ValueError:
-            variants[name] = direct
-    return {k: _densify(v) for k, v in variants.items()}
-
-
-def build_route(origin, destination, route_name):
-    if route_name not in ("Direct", "Northern", "Southern"):
-        raise HTTPException(400, "route_name must be Direct, Northern or Southern")
-    a, b = sorted((origin, destination))
-    pts = _compute_pair(a, b)[route_name]
-    return pts if origin == a else pts[::-1]
-
-
-# ---------- Routes ----------
 @app.get("/routes")
 def get_routes(origin: str, destination: str, current_user=Depends(get_current_user)):
     if origin not in PORTS or destination not in PORTS:
         raise HTTPException(400, "Invalid port")
     if origin == destination:
         raise HTTPException(400, "Origin and destination must differ")
+
+    lat1, lon1 = PORTS[origin]
+    lat2, lon2 = PORTS[destination]
+
+    # Distance-based offset: longer voyages get wider swings
+    base_offset = max(1.0, route_distance_nm([[lat1, lon1], [lat2, lon2]]) / 600)
 
     def pack(wps, speed, label, color):
         dist = route_distance_nm(wps)
@@ -449,13 +262,17 @@ def get_routes(origin: str, destination: str, current_user=Depends(get_current_u
             "co2_tons": round(fuel * 3.15, 1),
         }
 
+    direct = make_curved_path(lat1, lon1, lat2, lon2, 0, 40)
+    northern = make_curved_path(lat1, lon1, lat2, lon2, base_offset, 40)
+    southern = make_curved_path(lat1, lon1, lat2, lon2, -base_offset, 40)
+
     return {
         "origin": origin,
         "destination": destination,
         "routes": [
-            pack(build_route(origin, destination, "Direct"), 14, "Direct (Fastest)", "#22c55e"),
-            pack(build_route(origin, destination, "Northern"), 12, "Northern (Cheapest)", "#3b82f6"),
-            pack(build_route(origin, destination, "Southern"), 13, "Southern (Safest)", "#f97316"),
+            pack(direct, 14, "Direct (Fastest)", "#22c55e"),
+            pack(northern, 12, "Northern (Cheapest)", "#3b82f6"),
+            pack(southern, 13, "Southern (Safest)", "#f97316"),
         ],
     }
 
@@ -467,7 +284,18 @@ def download_route(origin: str, destination: str, route_name: str, current_user=
     if origin == destination:
         raise HTTPException(400, "Origin and destination must differ")
 
-    wps = build_route(origin, destination, route_name)
+    lat1, lon1 = PORTS[origin]
+    lat2, lon2 = PORTS[destination]
+    base_offset = max(1.0, route_distance_nm([[lat1, lon1], [lat2, lon2]]) / 600)
+
+    if route_name == "Direct":
+        wps = make_curved_path(lat1, lon1, lat2, lon2, 0, 40)
+    elif route_name == "Northern":
+        wps = make_curved_path(lat1, lon1, lat2, lon2, base_offset, 40)
+    elif route_name == "Southern":
+        wps = make_curved_path(lat1, lon1, lat2, lon2, -base_offset, 40)
+    else:
+        raise HTTPException(400, "route_name must be Direct, Northern or Southern")
 
     buf = io.StringIO()
     writer = csv.writer(buf)
