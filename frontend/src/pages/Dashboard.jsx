@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import api from '../api';
 
-const API_HOST = 'http://localhost:8000';
+const API_HOST = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const emptyForm = { name: '', imo_number: '', vessel_type: '' };
 
 export default function Dashboard() {
